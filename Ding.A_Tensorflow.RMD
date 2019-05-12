@@ -1,0 +1,172 @@
+---
+title: "Deep Learning Model"
+author: "Albert Ding, Xiangliang Liu, Emma Zhang"
+date: "May 7, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(keras)
+library(caret)
+library(tensorflow)
+load("everything.Rdata")
+
+First_treatment <- filter(First_treatment, HCPCS_Or_CPT_Code !="")#filter all the HCPCS/CPT code is blank
+First_treatment$rem_relapse <- as.numeric(First_treatment$rem_relapse) 
+treat <-First_treatment%>%
+  group_by(HCPCS_Or_CPT_Code)%>%
+  summarise(n = n())%>%
+  arrange(desc(n))
+
+treat <- mutate(treat, proportion = n/nrow(First_treatment))
+
+
+typical<-filter(First_treatment, HCPCS_Or_CPT_Code %in% c("J9041","J9047","J9070","J8530","J9145","J9476","J0897","J8540","J1100","C9477","J1650","J1442","Q5101","J1442","J1441","J2505","J1440","J9245","J2270","J2275","J2430","J2562","J7512","38241","J3489","J3487","G0463","G8427","G0364","J1642","G9678","G0008","G8484"))
+
+typical_treatment_dp <-typical %>% 
+  mutate(bortezomib =ifelse(HCPCS_Or_CPT_Code =="J9041",1,0))%>%
+  mutate(carfilzomib =ifelse(HCPCS_Or_CPT_Code =="J9047",1,0))%>%
+  mutate(cyclophosphamide =ifelse(HCPCS_Or_CPT_Code %in% c("J9070","J8530"),1,0))%>%
+  mutate(daratumumab =ifelse(HCPCS_Or_CPT_Code %in% c("J9145","JC9476"),1,0))%>%
+  mutate(denosumab =ifelse(HCPCS_Or_CPT_Code =="J0897",1,0))%>%
+  mutate(dexamethasone =ifelse(HCPCS_Or_CPT_Code %in% c("J8540","J1100"),1,0))%>%
+  mutate(elotuzumab =ifelse(HCPCS_Or_CPT_Code =="C9477",1,0))%>%
+  mutate(enoxaparin =ifelse(HCPCS_Or_CPT_Code =="J1650",1,0))%>%
+  mutate(filgrastim =ifelse(HCPCS_Or_CPT_Code %in% c("J1442","Q5101","J1442","J1441","J2505","J1440"),1,0))%>%
+  mutate(melphalan =ifelse(HCPCS_Or_CPT_Code =="J9245",1,0))%>%
+  mutate(morphine_sulfate =ifelse(HCPCS_Or_CPT_Code %in% c("J2270","J2275"),1,0))%>%
+  mutate(pamidronate = ifelse(HCPCS_Or_CPT_Code == "J2430",1,0))%>%
+  mutate(plerixafor = ifelse(HCPCS_Or_CPT_Code == "J2562",1,0))%>%
+  mutate(prednisone = ifelse(HCPCS_Or_CPT_Code == "J7512",1,0))%>%
+  mutate(stem_cell_transplant = ifelse(HCPCS_Or_CPT_Code == "38241",1,0))%>%
+  mutate(zoledronic_acid = ifelse(HCPCS_Or_CPT_Code %in% c("J3489","J3487"),1,0))%>%
+  mutate(clinic_visit_for_assessment_and_management =ifelse(HCPCS_Or_CPT_Code == "G0463",1,0))%>%
+  mutate(documenting_in_the_medical_record_they_obtained =ifelse(HCPCS_Or_CPT_Code == "G8427",1,0))%>%
+  mutate( bone_marrow_biopsy=ifelse(HCPCS_Or_CPT_Code == "G0364",1,0))%>%
+  mutate( Injection_heparin_sodium=ifelse(HCPCS_Or_CPT_Code == "J1642",1,0))%>%
+  mutate( enhanced_oncology_services=ifelse(HCPCS_Or_CPT_Code == "G9678",1,0))%>%
+  mutate( Administration_of_influenza=ifelse(HCPCS_Or_CPT_Code == "G0008",1,0))%>%
+  mutate( Influenza_immunization_was_not_administered=ifelse(HCPCS_Or_CPT_Code == "G8484",1,0))
+
+patient_typical_dp <- dplyr::select(typical_treatment_dp,2,3,12, 20,24,25,26,33,35,37:60)
+
+patient_level_dp<-patient_typical_dp%>%
+  group_by(Patient_ID.x,Service_Year.x,AGE,rem_relapse)%>%
+  summarise(bortezomib = sum(bortezomib),
+    carfilzomib = sum(carfilzomib),
+    cyclophosphamide = sum(cyclophosphamide),
+    daratumumab = sum(daratumumab),
+    denosumab = sum(denosumab),
+    dexamethasone = sum(dexamethasone),
+    elotuzumab = sum(elotuzumab),
+    enoxaparin = sum(enoxaparin),
+    filgrastim = sum(filgrastim),
+    melphalan = sum(melphalan),
+    morphine_sulfate = sum(morphine_sulfate),
+    pamidronate = sum(pamidronate),
+    plerixafor = sum(plerixafor),
+    prednisone= sum(prednisone),
+    prednisone= sum(prednisone),
+    stem_cell_transplant = sum(stem_cell_transplant),
+    zoledronic_acid = sum(zoledronic_acid),
+    clinic_visit_for_assessment_and_management = sum(clinic_visit_for_assessment_and_management),
+    documenting_in_the_medical_record_they_obtained = sum(documenting_in_the_medical_record_they_obtained),
+    bone_marrow_biopsy = sum(bone_marrow_biopsy),
+    Injection_heparin_sodium = sum(Injection_heparin_sodium),
+    enhanced_oncology_services =sum(enhanced_oncology_services),
+    Administration_of_influenza = sum(Administration_of_influenza),
+    Influenza_immunization_was_not_administered = sum(Influenza_immunization_was_not_administered))
+
+
+
+
+
+final<- patient_typical_dp%>%
+  select(5,8:33)
+
+
+#Creating training and testset split
+index <- createDataPartition(final$rem_relapse, p=0.7, list=FALSE)
+
+#Created an index using 70% of  data on training and 30% for test set
+final.training <- final[index,]
+final.test <- final[-index,]
+
+#Prepare the data for Keras by scaling it and ensure that they're categorical
+X_train <- final.training %>% 
+  select(-rem_relapse) 
+y_train <- to_categorical(final.training$rem_relapse)
+
+#Perform a similar transformation on the test set and the test set labels.
+X_test <- final.test %>% 
+  select(-rem_relapse)
+  
+y_test <- to_categorical(final.test$rem_relapse)
+
+#Define our model (I think this can be left as is)
+model <- keras_model_sequential() 
+
+model %>% 
+  layer_dense(units = 256, activation = 'relu', input_shape = ncol(X_train)) %>% 
+  layer_dropout(rate = 0.4) %>% 
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 2, activation = 'sigmoid')
+
+history <- model %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = c('accuracy')
+)
+
+model %>% fit(
+  as.matrix(X_train), as.matrix(y_train), 
+  epochs = 10, 
+  batch_size = 5,
+  validation_split = 0.3
+)
+
+#Look at model summary
+summary(model)
+
+Evaluate the model
+model %>% evaluate(X_test, y_test)
+
+class (model)
+
+model_type.keras.models.Sequential <- function(x, ...) {
+  "classification"}
+
+predict_model.keras.models.Sequential <- function (x, newdata, type, ...) {
+  pred <- predict_proba (object = x, x = as.matrix(newdata))
+  data.frame (Positive = pred, Negative = 1 - pred) }
+# #Visualize model loss in graph (should we keep this?)
+# plot(history$metrics$loss, main="Model Loss", xlab = "epoch", ylab="loss", col="orange", type="l")
+# lines(history$metrics$val_loss, col="skyblue")
+# legend("topright", c("Training","Testing"), col=c("orange", "skyblue"), lty=c(1,1))
+#
+# #Visualize model accuracy in graph
+# plot(history$metrics$acc, main="Model Accuracy", xlab = "epoch", ylab="accuracy", col="orange", type="l")
+# lines(history$metrics$val_acc, col="skyblue")
+# legend("topleft", c("Training","Testing"), col=c("orange", "skyblue"), lty=c(1,1))
+ keras::predict_proba()
+predict_model.keras.models.Sequential (x = model,
+               newdata = X_test,
+               type    = 'raw') %>%
+  tibble::as_tibble()
+#Make predictions
+predictions <- model %>% predict_classes(X_test)
+
+#Print confusion matrix
+table(factor(predictions, levels= min(final.test$rem_relapse):max(final.test$rem_relapse)),factor(final.test$rem_relapse, levels= min(final.test$rem_relapse):max(final.test$rem_relapse)))
+
+
+
+```
+
+

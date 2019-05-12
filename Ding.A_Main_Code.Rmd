@@ -1,0 +1,584 @@
+---
+title: "Trinity Main Code"
+author: "Albert Ding, Xiangliang Liu, Emma Zhang"
+date: "April 11, 2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+###loading all the library
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(maps)
+library(Hmisc)
+library(ipw)
+library(arm)
+library(randomForest)
+library(e1071)
+library(mlbench)
+library(caret)
+library(glmnet)
+library(kableExtra)
+library(texreg)
+```
+
+##Read in all the data in MM
+```{r}
+# MM_tblClaim <- read.delim(file = "F:/Boston University/Raw Data/Spring 2019/MM/MM Sample/MM_tblClaim.txt.gz",header = TRUE,sep="|")
+# MM_tblClaimICD <- read.delim(file = "F:/Boston University/Raw Data/Spring 2019/MM/MM Sample/MM_tblClaimICD.txt.gz",header = TRUE,sep="|")
+# MM_tblEnrollment <- read.delim(file = "F:/Boston University/Raw Data/Spring 2019/MM/MM Sample/MM_tblEnrollment.txt.gz",header = TRUE,sep="|")
+# MM_tblNPIClaimXref <- read.delim(file = "F:/Boston University/Raw Data/Spring 2019/MM/MM Sample/MM_tblNPIClaimXref.txt.gz",header = TRUE,sep="|")
+# MM_tblPatient <- read.delim(file = "F:/Boston University/Raw Data/Spring 2019/MM/MM Sample/MM_tblPatient.txt.gz",header = TRUE,sep="|")
+# MM_tblRevenue <- read.delim(file = "F:/Boston University/Raw Data/Spring 2019/MM/MM Sample/MM_tblRevenue.txt.gz",header = TRUE,sep="|")
+
+#save.image(file = "F:/BU Users/Team3/data/Alldata.RData")
+
+
+```
+
+##Clean the data:
+```{r eval=FALSE, include=FALSE}
+#change the ICD9 version to ICD10 version
+ICD9 = filter(MM_tblClaimICD,Code_Version == 9)
+ICD9MM = filter(ICD9, ICD_Code %in% c(20302,20301))
+ICD9MM$ICD_Code[ICD9MM$ICD_Code ==20302] <- "C9002"
+ICD9MM$ICD_Code[ICD9MM$ICD_Code ==20301] <- "C9001"
+IDC9_final<-ICD9MM %>% dplyr::select(TPI_Claim_Id,Patient_ID,Data_Set,ICD_Code,DGNS_Source,Code_Flag)
+#data cleaning in ICD10
+ICD10 = filter(MM_tblClaimICD, Code_Version ==10)
+ICD10MM = filter(ICD10, ICD_Code %in% c("C9001","C9002"))
+IDC10_final <- ICD10MM %>% dplyr::select(TPI_Claim_Id,Patient_ID,Data_Set,ICD_Code,DGNS_Source,Code_Flag)
+#merge ICD9 and ICD10 together.
+ICD <- bind_rows(IDC10_final,IDC9_final)
+ICD_final <-filter(ICD, DGNS_Source == "Diagnosis")
+ICD_final<- ICD_final[!duplicated(ICD_final$TPI_Claim_Id),]
+#nrow(ICD_final)
+length(unique(MM_tblClaim$TPI_Claim_Id))
+MM_tbl_Claim <- dplyr::select(MM_tblClaim, TPI_Claim_Id,Patient_ID, Service_Year, Facility_Type_Code, Facility_Type_Description,Claim_Type_Code,Claim_Type_Description, Facility_Type_Code, Facility_Type_Service_Description)
+MM_claim<-left_join(ICD_final,MM_tbl_Claim, by= "TPI_Claim_Id")
+
+#change the column name of patient_id in patient level
+colnames(MM_claim)[colnames(MM_claim) =="Patient_ID.x"]<- "Patient_ID"
+#check whether the patient ID is unique.
+length(unique(MM_tblPatient$Patient_ID))
+# As we can see the patient Id is not unique.
+#Select the column in patient level
+MM_tbl_Patient <-dplyr::select(MM_tblPatient, Service_Year,Patient_ID,Census_Bureau_Region, State,AGE,Sex, Race, Date_Of_Death, Year_Of_Death, MEDICARE_STATUS_CODE,MEDICARE_STATUS, ORIG_REASON_FOR_ENTITLEMENT, CURR_REASON_FOR_ENTITLEMENT,IP,PO,OP )
+Patient_MM <- filter(MM_tbl_Patient,Patient_ID %in% ICD_final$Patient_ID)
+#merge the dataset, MM_data_raw is the claim level of data
+MM_data_raw<- merge(MM_claim,MM_tbl_Patient, by = c("Patient_ID", "Service_Year"))
+
+#select the treatment variable in revenue dataset
+revenue <-  MM_tblRevenue%>%dplyr::select(TPI_Claim_Id,Patient_ID,Service_Year,Srvc_From_Date,Srvc_Thru_Date,Provider_Type,Revenue_Center_Code,HCPCS_Or_CPT_Code,HCPCS_Or_CPT_Code_Desc)
+
+#intergrate all the treatment for MM Patient with unique treatment.
+Treatment_MM <- left_join( MM_data_raw,revenue, by = "TPI_Claim_Id")
+#Treatment_MM is the final version of the data,each row is a treatment.
+
+#save.image(file = "F:/BU Users/Team3/data/complete.RData")
+
+```
+
+
+
+#Calculate the number of remission and relapse in firs-line treatment
+```{r}
+load("complete.Rdata")
+
+# Convert date format in MM_Revenue
+Treatment_MM$Srvc_Thru_Date<-gsub("-","",Treatment_MM$Srvc_Thru_Date)
+Treatment_MM$Srvc_Thru_Date<-as.Date(Treatment_MM$Srvc_Thru_Date, "%Y%m%d")
+
+
+# Select the first line treatment with relapse
+First_treatment_relapse<-Treatment_MM%>%
+  filter(ICD_Code =="C9002")%>%
+  group_by(Patient_ID.x)%>%
+  summarise(relapse_date = min(Srvc_Thru_Date))
+
+
+#leftjoin the table for patients who ever remiss.
+First_relapse <-left_join(Treatment_MM, First_treatment_relapse, by = "Patient_ID.x")
+first_treatment_rel <- filter(First_relapse, Srvc_Thru_Date< relapse_date )
+
+#Create a indicator variable "rem_relapse"
+first_treatment_rel$rem_relapse <- 1
+
+# Select the first line treatment with remission
+first_treatment_rem<-Treatment_MM%>%
+  filter(ICD_Code =="C9001" & ! Patient_ID.x %in% First_treatment_relapse$Patient_ID.x)
+
+#Create a indicator variable "rem_relapse"
+first_treatment_rem$rem_relapse <- 0
+
+
+#bind rowws together
+First_treatment <- bind_rows(first_treatment_rel, first_treatment_rem)
+First_treatment <- filter(First_treatment, HCPCS_Or_CPT_Code !="")#filter all the HCPCS/CPT code is blank
+First_treatment$rem_relapse <- as.factor(First_treatment$rem_relapse) 
+First_treatment$Service_Year.x <- as.factor(First_treatment$Service_Year.x)
+
+
+
+```
+
+##Check the missingness:
+```{r}
+missing<-First_treatment %>% summarise_all(funs(sum(is.na(.))/n()*100)) %>%
+gather(key="feature", value="missing_pct")
+missing%>%
+ggplot(aes(x=reorder(feature,-missing_pct),y=missing_pct)) +
+geom_bar(stat="identity", fill="sky blue")+
+labs(y = "missing %", x = "features") +
+coord_flip() +
+labs(title = "proportion of missing value in the dataset")
+```
+
+###Feature engineering: Select useful treatment that influence the model
+
+##draw a map of demographic info
+```{r}
+#Construct a dataframe with number of claim in state
+a <-MM_data_raw%>%
+  group_by(State)%>%
+  summarise(n = n())
+colnames(a)[colnames(a)== "State"] <- "region"
+a$region <- as.character(a$region)
+#Construct a dataframe with number of MM patient in state
+b <-Patient_MM%>%
+  group_by(State)%>%
+  summarise(n = n())
+colnames(b)[colnames(a)== "State"] <- "region"
+b$region <- as.character(a$region)
+#Load the US map data
+us_states <- map_data("state")
+us_states$region <- capitalize(us_states$region)
+Claim_states <- left_join(us_states,a, by ="region")
+Patient_states <- left_join(us_states,b, by ="region")
+library(maps)
+library(Hmisc)
+#map 1
+ggplot(data = Claim_states, aes(x = long, y = lat, group =group, fill = n)) + geom_polygon(color = "grey90",size = 0.1)+ coord_map(projection = "albers", lat0 =39,lat1 = 45)+ labs(fill = "Numbers of Claims") +labs(title ="Number of MM Claims in Different States",x="Longtitude",y="Latitude")
+#save.image(file = "F:/BU Users/Team3/data/complete.RData")
+#map 2
+ggplot(data = Patient_states, aes(x = long, y = lat, group =group, fill = n)) + geom_polygon(color = "grey90",size = 0.1)+ coord_map(projection = "albers", lat0 =39,lat1 = 45)+ labs(fill = "Numbers of Patients") +labs(title ="Number of MM patients in Different States",x="Longtitude",y="Latitude")
+
+```
+
+####manually selected features
+
+```{r}
+typical<-filter(First_treatment, HCPCS_Or_CPT_Code %in% c("J9041","J9047","J9070","J8530","J9145","J9476","J8540","J1100","J1650","J1442","Q5101","J1442","J1441","J2505","J1440","J2270","J2275","J2430","J2562","38241","J3489","J3487") )
+
+typical_treatment <-typical %>% 
+  mutate(bortezomib =ifelse(HCPCS_Or_CPT_Code =="J9041",1,0))%>%
+  mutate(carfilzomib =ifelse(HCPCS_Or_CPT_Code =="J9047",1,0))%>%
+  mutate(cyclophosphamide =ifelse(HCPCS_Or_CPT_Code %in% c("J9070","J8530"),1,0))%>%
+  mutate(daratumumab =ifelse(HCPCS_Or_CPT_Code %in% c("J9145","JC9476"),1,0))%>%
+
+  mutate(dexamethasone =ifelse(HCPCS_Or_CPT_Code %in% c("J8540","J1100"),1,0))%>%
+
+  mutate(enoxaparin =ifelse(HCPCS_Or_CPT_Code =="J1650",1,0))%>%
+  mutate(filgrastim =ifelse(HCPCS_Or_CPT_Code %in% c("J1442","Q5101","J1442","J1441","J2505","J1440"),1,0))%>%
+  mutate(morphine_sulfate =ifelse(HCPCS_Or_CPT_Code %in% c("J2270","J2275"),1,0))%>%
+  mutate(pamidronate = ifelse(HCPCS_Or_CPT_Code == "J2430",1,0))%>%
+  mutate(plerixafor = ifelse(HCPCS_Or_CPT_Code == "J2562",1,0))%>%
+  mutate(stem_cell_transplant = ifelse(HCPCS_Or_CPT_Code == "38241",1,0))%>%
+  mutate(zoledronic_acid = ifelse(HCPCS_Or_CPT_Code %in% c("J3489","J3487"),1,0))
+
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code=="J9041"] = "bortezomib"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code=="J9047"] = "carfilzomib"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code %in% c("J9070","J8530")] = "cyclophosphamide"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code %in% c("J9145","JC9476")] = "daratumumab"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code %in% c("J8540","J1100")] = "dexamethasone"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code=="J1650"] = "enoxaparin"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code %in% c("J1442","Q5101","J1442","J1441","J2505","J1440")] = "filgrastim"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code %in% c("J2270","J2275")] = "morphine_sulfate"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code=="J2430"] = "pamidronate"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code=="J2562"] = "plerixafor"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code=="38241"] = "stem_cell_transplant"
+typical_treatment$treatment[typical_treatment$HCPCS_Or_CPT_Code %in% c("J3489","J3487")] = "mzoledronic_acid"
+
+patient_typical <- dplyr::select(typical_treatment,2,3,12, 20,24,25,26,33,35,37:50)
+patient_typical$Service_Year.x <- as.character(patient_typical$Service_Year.x)
+patient_level<-patient_typical%>%
+  group_by(Patient_ID.x,Service_Year.x,Data_Set, AGE, Race, Sex,rem_relapse,treatment)%>%
+  summarise(bortezomib = sum(bortezomib),
+    carfilzomib = sum(carfilzomib),
+    cyclophosphamide = sum(cyclophosphamide),
+    daratumumab = sum(daratumumab),
+    dexamethasone = sum(dexamethasone),
+    enoxaparin = sum(enoxaparin),
+    filgrastim = sum(filgrastim),
+    morphine_sulfate = sum(morphine_sulfate),
+    pamidronate = sum(pamidronate),
+    plerixafor = sum(plerixafor),
+    stem_cell_transplant = sum(stem_cell_transplant),
+    zoledronic_acid = sum(zoledronic_acid))
+
+
+patient_typical$Service_Year.x <- as.character(patient_typical$Service_Year.x)
+```
+
+
+
+##EDAs
+```{r}
+#EDAs regarding to demographic info for all patients
+ggplot(data = Patient_MM, aes(x = AGE )) + geom_histogram(fill= "sky blue",bins = 50)+theme_classic()+labs(title="The distribution of MM Patient in Different Age", x="Age",y="Number of Patient")
+
+ggplot(data =Patient_MM, aes(x = AGE )) + geom_histogram(fill= "sky blue")+theme_classic()+labs(title="The distribution of MM Patient in Different Age", x="Age",y="Number of Patient")
+
+ggplot( Patient_MM, aes(x = Sex,fill = Sex)) + geom_bar()+ theme_classic()+labs(title="The Number of MM Patients In Different Gender",x="Sex",y="Number of Patient")
+Patient_MM<-Patient_MM%>%
+  filter(Race != "")
+
+ggplot( patient_level[patient_level$Race!="",], aes(x = Race,fill= Race)) + geom_bar()+ theme_classic()+labs(title="Number of Patients in Different Race",y="Number of Patients")+theme(axis.text.x = element_text(angle = 90))
+ggplot( Patient_MM, aes(x =Census_Bureau_Region,fill= Race)) + geom_bar()+ theme_classic()+labs(title="The Number of MM Patients in Different Region",y="Number of Patients")
+
+ggplot( MM_data_raw, aes(x = ICD_Code,fill = ICD_Code )) + geom_bar()+ theme_classic()+labs(title="The Number of MM Patients relaps and remission in Different Years",y="Number of Patients relaps and remission")+ facet_grid(cols = vars(Service_Year))
+
+#type of treatments that used previously
+ggplot( typical_treatment, aes(x = HCPCS_Or_CPT_Code,fill= as.factor(Service_Year.x))) + geom_bar()+ theme_classic()+labs(title="The Number of traeatment in Different Years",y="Number of Treatment")
+
+#find the highest frequency of first-line treatments:
+
+treat1 <-typical_treatment%>%
+  group_by(treatment)%>%
+  summarise(n = n())%>%
+  arrange(desc(n))
+treat1 <- mutate(treat1, proportion = n/nrow(typical_treatment))
+
+treat2 <-patient_level%>%
+  group_by(treatment)%>%
+  summarise(n = n())%>%
+  arrange(desc(n))
+colnames(treat2)[colnames(treat2)=="n"]<-"n_patient"
+treat <- left_join(treat1, treat2, by = "treatment")
+
+
+ggplot(data = typical_treatment, aes(as.factor(rem_relapse), fill =as.factor(rem_relapse)))+ geom_bar() + theme(axis.text.x  = element_text(angle = 00, hjust =1)) + facet_wrap(vars(Service_Year.x)) + labs( x = "remission or relapse", title = "The number of patients relapse or remit in different years",fill = "Relapse or not")
+
+ggplot(data = typical_treatment, aes(as.factor(rem_relapse), fill =as.factor(rem_relapse)))+ geom_bar() + theme(axis.text.x  = element_text(angle = 00, hjust =1)) + facet_wrap(vars(Data_Set)) + labs( x = "remission or relapse", title = "The number of patients relapse or remit in different data set",fill = "Relapse or not")
+
+ggplot(data = typical_treatment, aes(as.factor(rem_relapse), fill =as.factor(rem_relapse)))+ geom_bar() + theme(axis.text.x  = element_text(angle = 00, hjust =1)) + facet_wrap(vars(Claim_Type_Description)) + labs( x = "remission or relapse", title = "The number of patients relapse or remit in different claim type",fill = "Relapse or not")
+
+abcd <- left_join(typical_treatment, treat, by = "treatment") 
+
+ggplot(data = abcd, aes(reorder(treatment,-n), fill = as.factor(rem_relapse)))+ geom_bar(position = "fill") +theme(axis.text.x  = element_text(angle = 90, hjust =1)) +labs( x = "Patient Group with One or More of Stated Treatment (Non-Disjoint)",y = "Proportion Remission and Relapse", title = "Proportion Remission or Relapse for Patient Group \n Exposed to One or More of Corresponding Treatment",fill = "Relapse or Not") + theme(plot.title = element_text(hjust = 0.5))
+
+kable(treat)
+
+ggplot(data = patient_level, aes(as.factor(rem_relapse), fill = as.factor(rem_relapse))) + geom_bar()+labs( x = "remission or relapse", title = "The number of patients relapse or remit",fill = "Relapse or not")
+
+ggplot(patient_level, aes(x = as.factor(rem_relapse), y =AGE, color = as.factor(rem_relapse))) + geom_boxplot()+labs (x = "remission or relapse", title = "distribution of age for patients with relapse of remission",fill = "Relapse or not") + scale_fill_discrete(name = "relapse or not")
+
+ggplot(patient_level,aes(Sex,fill = as.factor(rem_relapse))) + geom_bar(position = "fill")+labs (x = "Remission or Relapse",y= "Proportion Remission and Relapse", title = "Proportion of Relapse and Remission Patients with Gender",fill = "Relapse or Not")
+# ggplot(data = First_treatment, aes(as.factor(rem_relapse,), fill =as.factor(rem_relapse)))+ geom_bar() +theme(axis.text.x  = element_text(angle = 0, hjust =1) )+ facet_wrap(vars(Facility_Type_Description))+labs(title = "Distribution of treatment resualt in different facilities", x = "ICD code")+labs( x = "remission or relapse", title = "The number of patients relapse or remit in different ",fill = "Relapse ,or not")
+
+
+```
+
+###modeling (random forest, logistics)
+```{r}
+#using varImp() fucntion
+library(caret)
+#using random forest to find the importance of varible
+set.seed(1)
+patient_level <-patient_level[,-8]
+patient_level_1 <- patient_level[,-1]
+patient_level_1$rem_relapse <- as.factor(patient_level_1$rem_relapse)
+training.samples <- patient_level_1$rem_relapse %>% 
+  createDataPartition(p = 0.6, list = FALSE)
+train.data  <- patient_level_1[training.samples, ]
+test.data <- patient_level_1[-training.samples, ]
+        
+rf_mod <- randomForest(rem_relapse ~ ., data =train.data ,ntree = 1000)
+varImpPlot(rf_mod)
+
+#ROC
+require(pROC)
+rf.roc<-roc(train.data$rem_relapse,rf_mod$votes[,2])
+plot(rf.roc)
+auc(rf.roc)
+
+y_hat_rf1 <- predict(rf_mod, newdata = test.data )
+# Model accuracy
+observed <-test.data$rem_relapse
+predicted <-y_hat_rf1
+mean(predicted == observed)
+table(observed,predicted)
+
+
+#using grid search to find the best mtry
+
+set.seed(1)
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+tunegrid <- expand.grid(.mtry=c(1:15))
+rf_gridsearch <- train(rem_relapse~., data=patient_level_1, method="rf", metric="Accuracy", tuneGrid=tunegrid, trControl=control)
+kable(print(rf_gridsearch))
+plot(rf_gridsearch)
+
+# # Manual Search best ntreee(we don't have to consider the number of trees.)
+# control <- trainControl(method="repeatedcv", number=10, repeats=3, search="grid")
+# tunegrid <- expand.grid(.mtry=c(sqrt(ncol(patient_level_1))))
+# modellist <- list()
+# for (ntree in c(1000, 1500, 2000, 2500)) {
+# 	set.seed(1)
+# 	fit <- train(rem_relapse~., data=patient_level_1, method="rf", metric="Accuracy", tuneGrid=tunegrid, trControl=control, ntree=ntree)
+# 	key <- toString(ntree)
+# 	modellist[[key]] <- fit
+# }
+# # compare results
+# results <- resamples(modellist)
+# summary(results)
+# dotplot(results)
+
+##set a indicator for whether the treatment was used
+
+# patient_level2<-patient_typical%>%
+#   group_by(Patient_ID.x,Service_Year.x,Data_Set, AGE, Race, Sex,rem_relapse)%>%
+#   summarise(bortezomib = sum(bortezomib),
+#     carfilzomib = sum(carfilzomib),
+#     cyclophosphamide = ifelse(sum(cyclophosphamide)>=1,1,0),
+#     daratumumab = ifelse(sum(daratumumab)>=1,1,0),
+#     denosumab = ifelse(sum(denosumab)>=1,1,0),
+#     dexamethasone = ifelse(sum(dexamethasone)>=1,1,0),
+#     elotuzumab = ifelse(sum(elotuzumab)>=1,1,0),
+#     enoxaparin = ifelse(sum(enoxaparin)>=1,1,0),
+#     filgrastim = ifelse(sum(filgrastim)>=1,1,0),
+#     melphalan = ifelse(sum(melphalan)>=1,1,0),
+#     morphine_sulfate = ifelse(sum(morphine_sulfate)>=1,1,0),
+#     pamidronate = ifelse(sum(pamidronate)>=1,1,0),
+#     plerixafor = ifelse(sum(plerixafor)>=1,1,0),
+#     prednisone= ifelse(sum(prednisone)>=1,1,0),
+#     prednisone= ifelse(sum(prednisone)>=1,1,0),
+#     stem_cell_transplant = ifelse(sum(stem_cell_transplant)>=1,1,0),
+#     zoledronic_acid = ifelse(sum(zoledronic_acid)>=1,1,0))
+# 
+# patient_level_1 <- patient_level2[,-1]
+# patient_level_1$rem_relapse <- as.factor(patient_level_1$rem_relapse)
+# training.samples <- patient_level_1$rem_relapse %>% 
+#   createDataPartition(p = 0.6, list = FALSE)
+# train.data  <- patient_level_1[training.samples, ]
+# test.data <- patient_level_1[-training.samples, ]
+#         
+# rf_mod <- randomForest(rem_relapse ~ ., data =train.data ,ntree = 1000)
+# varImpPlot(rf_mod)
+# #ROC
+# require(pROC)
+# rf.roc<-pROC::roc(train.data$rem_relapse,rf_mod$votes[,2])
+# plot(rf.roc)
+# auc(rf.roc)
+# 
+# y_hat <- predict(rf_mod, newdata = test.data )
+# # Model accuracy
+# mean(y_hat == test.data$rem_relapse)
+# table(test.data$rem_relapse,y_hat)
+# 
+# nrow(patient_level_1)
+
+
+#logistic mode
+logit_mod <- glm(as.factor(rem_relapse) ~., family = binomial(link = "logit"),data =train.data)
+summary(logit_mod)
+screenreg(logit_mod, custom.model.names = "logistics model")
+
+#binned plot
+y_hat_log <- predict(logit_mod, newdata = test.data)
+predicted <- ifelse(y_hat_log >0.5,1,0)
+observed <- test.data$rem_relapse
+mean(predicted == observed)
+table(predicted,observed)
+
+binnedplot(fitted(logit_mod), resid(logit_mod))
+
+```
+
+
+###CPT method models(random forest 2 and logistics model)
+```{r}
+set.seed(1234)
+#filter all the treatment inside 
+Catagory<-filter(First_treatment, HCPCS_Or_CPT_Code %in% c(10000:69990,90281:99099,99151:99199,99500:99607))
+CPT_level<-filter(Catagory, HCPCS_Or_CPT_Code %in% c("96401","38221","96409","96413"))
+# treat_catagory <-Catagory%>%
+#   group_by(HCPCS_Or_CPT_Code)%>%
+#   summarise(n = n())%>%
+#   arrange(desc(n))
+# 
+# treat_c <- mutate(treat_catagory, proportion = n/nrow(Catagory))
+
+CPT_treatment <-CPT_level %>% 
+  mutate(chemo_anti_neopl =ifelse(HCPCS_Or_CPT_Code =="96401",1,0))%>%
+  mutate(bone_marrow_biopsy =ifelse(HCPCS_Or_CPT_Code =="38221",1,0))%>%
+  mutate(chemo_iv_push =ifelse(HCPCS_Or_CPT_Code =="96409",1,0))%>%
+  mutate(chemo_iv_infusion =ifelse(HCPCS_Or_CPT_Code =="96413",1,0))
+
+ CPT_typical<-dplyr::select(CPT_treatment,2,3,12, 20,24,25,26,33,35,37:41)
+ CPT_typical$Service_Year.x <- as.character(CPT_typical$Service_Year.x)
+ CPT_level<-CPT_typical%>%
+  group_by(Patient_ID.x,Service_Year.x,Data_Set, AGE, Race, Sex,rem_relapse)%>%
+  summarise(chemo_anti_neopl = sum(chemo_anti_neopl),
+    bone_marrow_biopsy = sum(bone_marrow_biopsy),
+    chemo_iv_push = sum(chemo_iv_push),
+    chemo_iv_infusion = sum(chemo_iv_infusion))
+#define testing data dn training data
+ CPT_level_1 <- CPT_level[,-1]
+CPT_level_1$rem_relapse <- as.factor(CPT_level_1$rem_relapse)
+training.samples <- CPT_level_1$rem_relapse %>% 
+  createDataPartition(p = 0.6, list = FALSE)
+train.data  <- CPT_level_1[training.samples, ]
+test.data <- CPT_level_1[-training.samples, ]
+        
+#logistic mode
+logit_mod_2 <- glm(rem_relapse ~., family = binomial(link = "logit"),data =train.data)
+summary(logit_mod_2)
+y_hat_log2 <- predict(logit_mod_2, newdata = test.data )
+predicted.classes <- ifelse(y_hat_log2>0.5,1,0)
+observed.classes <- test.data$rem_relapse
+#accuracy rate
+mean(predicted.classes == observed.classes)
+table(predicted.classes, observed.classes)
+#binned plot 
+binnedplot(fitted(logit_mod_2), resid(logit_mod_2))
+#random forest 2 model 
+
+rf_mod_2 <- randomForest(rem_relapse ~ ., data =train.data ,ntree = 1000)
+varImpPlot(rf_mod_2)
+#ROC
+require(pROC)
+rf.roc<-roc(train.data$rem_relapse,rf_mod_2$votes[,2])
+plot(rf.roc)
+auc(rf.roc)
+
+y_hat_2 <- predict(rf_mod_2, newdata = test.data )
+predicted.classes <- y_hat_2
+observed.classes <- test.data$rem_relapse
+# Model accuracy
+mean(predicted.classes == observed.classes)
+table(predicted.classes,observed.classes)
+```
+
+
+
+
+##lasso/ridge regression model
+
+```{r}
+#ridge lasso logistics regression
+set.seed(2019)
+# Split the data into training and test set
+patient_level_1$rem_relapse <- as.factor(patient_level_1$rem_relapse)
+training.samples <- patient_level_1$rem_relapse %>% 
+  createDataPartition(p = 0.6, list = FALSE)
+train.data  <- patient_level_1[training.samples, ]
+test.data <- patient_level_1[-training.samples, ]
+# Dumy code categorical predictor variables
+x <- model.matrix(rem_relapse~., train.data)[,-1]
+# Convert the outcome (class) to a numerical variable
+y <- train.data$rem_relapse
+cv_log <-glmnet(x, y, family = "binomial", alpha = 1, lambda = NULL)
+
+# Find the best lambda using cross-validation
+set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+# Fit the final model on the training data
+model <- glmnet(x, y, alpha = 1, family = "binomial", lambda = cv.lasso$lambda.min)
+# Display regression coefficients
+coef(model)
+# Make predictions on the test data
+
+x.test <- model.matrix(rem_relapse~., test.data)[,-1]
+predict <- model %>% predict(newx = x.test)
+predicted <- ifelse(predict> 0.5,1,0)
+#confusion matrix
+observed<- test.data$rem_relapse
+table(predicted,observed)
+# Model accuracy
+mean(predicted == observed)
+
+```
+
+###Ridge regression
+```{r}
+
+set.seed(123)
+# Split the data into training and test set
+patient_level_1$rem_relapse <- as.factor(patient_level_1$rem_relapse)
+training.samples <- patient_level_1$rem_relapse %>% 
+  createDataPartition(p = 0.5, list = FALSE)
+train.data  <- patient_level_1[training.samples, ]
+test.data <- patient_level_1[-training.samples, ]
+# Dumy code categorical predictor variables
+x <- model.matrix(rem_relapse~., train.data)[,-1]
+# Convert the outcome (class) to a numerical variable
+y <- train.data$rem_relapse
+cv_log <-glmnet(x, y, family = "binomial", alpha = 0, lambda = NULL)
+
+# Find the best lambda using cross-validation
+set.seed(123) 
+cv.lasso <- cv.glmnet(x, y, alpha = 0, family = "binomial")
+cv.lasso$lambda.min
+# Fit the final model on the training data
+model <- glmnet(x, y, alpha = 0, family = "binomial", lambda = cv.lasso$lambda.min)
+# Display regression coefficients
+summary(model)
+# Make predictions on the test data
+
+x.test <- model.matrix(rem_relapse~., test.data)[,-1]
+predict <- model %>% predict(newx = x.test)
+predicted <- ifelse(predict> 0.5,1,0)
+#confusion matrix
+observed<- test.data$rem_relapse
+table(predicted,observed)
+# Model accuracy
+mean(predicted == observed)
+```
+
+###XGBoosting
+```{r eval=FALSE, include=FALSE}
+require(xgboost)
+head(train.data)
+#select the train dataset and traser it to matrix
+train_data$outcome<-ifelse(train_data$ICD_Code =="C9001", 1, 0)
+input_train<-as.matrix(train.data[,-c(1,2,4,5)])
+output_train<-as.matrix(train.data[,9])
+#dtrain <- xgb.DMatrix(train$rem_relapse, label=y)
+#dtest <- xgb.DMatrix(data = test$data, label=test$label),eval_metric = "auc"
+bst <- xgboost(data =input_train, label=output_train,max.depth = 2, eta = 1, nthread = 2, nrounds = 2, objective = "binary:logistic",eval_metric = "auc")
+xgb.probs<-predict(bst, input_train)
+hist(xgb.probs)
+cv.fit<-xgb.cv(max_depth = 2, eta = 1, data = input_train,
+               label = output_train, metrics = "auc", nfold = 10,
+               nrounds = 50, objective ="binary:logistic")
+best_param = list()
+best_seednumber = 1234
+best_logloss = Inf
+best_logloss_index = 0
+
+
+for (iter in 1:1000) {
+  param <-list(objective = "binary:logistic",
+               eval_metric = "mlogloss",
+               max_depth = sample(6:10, 1),
+               eta = runif(1,0.01,0.3),
+               gamma = runif(1,0.0,0.2),
+               subsample = runif(1,0.6,0.9),
+               colsample_bytree = runif(1,0.5,0.8),
+               min_child_weight = sample(1:40, 1),
+               max_delta_depth = sample(1:10, 1)
+               )
+  cv.nround = 1000
+  cv.nfold = 5
+  seed.number = sample.int(10000,1)[[1]]
+  set.seed(seed.number)
+  mdcv<-xgb.cv()
+}
+```
