@@ -145,6 +145,7 @@ model_type.keras.models.Sequential <- function(x, ...) {
 predict_model.keras.models.Sequential <- function (x, newdata, type, ...) {
   pred <- predict_proba (object = x, x = as.matrix(newdata))
   data.frame (Positive = pred, Negative = 1 - pred) }
+
 #Visualize model loss in graph (should we keep this?)
   plot(history$metrics$loss, main="Model Loss", xlab = "epoch", ylab="loss", col="orange", type="l")
   lines(history$metrics$val_loss, col="skyblue")
@@ -159,6 +160,7 @@ predict_model.keras.models.Sequential (x = model,
                newdata = X_test,
                type    = 'raw') %>%
   tibble::as_tibble()
+
 #Make predictions
 predictions <- model %>% predict_classes(X_test)
 
