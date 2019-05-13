@@ -1,5 +1,5 @@
 # Cancer_Patient_Outcome_Analysis
-A small foray into finding a cure for cancer: predictive modeling and interpretability of remission or relapse in multiple myeloma patients using random forest, deep learning, and L1 penalized logistic regression
+Finding a cure for cancer: a foray into predictive modeling and interpretability of remission or relapse in multiple myeloma patients using random forest, deep learning, and L1 penalized logistic regression
 
 Files include:
 - Code for data import, cleaning, visualization, and modeling ("Ding.A_Main_Code.RMD)
