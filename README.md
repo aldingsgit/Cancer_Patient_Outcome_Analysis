@@ -1,5 +1,5 @@
 # Cancer_Patient_Outcome_Analysis
-Comparison of feature engineering methods for predictive modeling of remission or relapse in multiple myeloma patients
+Interpretable machine learning: predictive modeling of remission or relapse in multiple myeloma patients using random forest, deep learning, and L1 penalized logistic regression
 
 Files include:
 - Code for data import, cleaning, visualization, and modeling ("Ding.A_Main_Code.RMD)
