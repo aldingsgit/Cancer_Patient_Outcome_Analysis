@@ -1,5 +1,5 @@
 # Cancer_Patient_Outcome_Analysis
-Interpretable predictive modeling of multiple myeloma patient outcomes (remission / relapse) using random forest, deep learning, and L1 penalized logistic regression
+Predictive modeling of multiple myeloma patient outcomes (remission / relapse) using random forest, deep learning, and L1 penalized logistic regression
 
 Files include:
 - Code for data import, cleaning, visualization, and modeling ("Ding.A_Main_Code.RMD)
